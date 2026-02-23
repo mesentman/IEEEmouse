@@ -25,10 +25,11 @@ endif()
 # ====================================================================================
 set(PICO_BOARD pico_w CACHE STRING "Board type")
 
+set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(dev_hid_composite C CXX ASM)
+project(dev_hid_composite C CXX ASM)        
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
