@@ -1,8 +1,7 @@
 # Build artifacts
 build/
 
-# External SDKs
-pico-sdk/
+
 
 # IDE files
 .vscode/
