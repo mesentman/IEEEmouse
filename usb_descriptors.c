@@ -105,7 +105,7 @@ char const* string_desc_arr [] =
 {
     (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
     "PaniRCorp",                   // 1: Manufacturer
-    "Pico W Mouse",                // 2: Product
+    "PMW 3389 Mouse",                // 2: Product
 };
 
 static uint16_t _desc_str[32];
