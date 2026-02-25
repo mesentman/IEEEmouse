@@ -145,7 +145,8 @@ void pmw_upload_srom() {
         *dx = 0;
         *dy = 0;
     }
-}
+} 
+    
 /*void pmw_init() {
     // Hardware reset pulse
     gpio_put(PIN_RST, 0);
@@ -270,7 +271,7 @@ int main(void) {
 }
 
 // --- HID Task ---
-void hid_task(void) {
+/*void hid_task(void) {
     // Poll interval (e.g., 2ms for 500Hz polling rate)
     const uint32_t interval_ms = 2;
     static uint32_t start_ms = 0;
@@ -325,7 +326,89 @@ void hid_task(void) {
 
     previous_buttons = current_buttons;
 }
+*/
+    // --- HID Task ---
+/*void hid_task(void) {
+    // Poll interval (e.g., 2ms for 500Hz polling rate)
+    const uint32_t interval_ms = 2;
+    static uint32_t start_ms = 0;
+    static uint8_t previous_buttons = 0;
 
+    if ( board_millis() - start_ms < interval_ms) return; 
+    start_ms += interval_ms;
+
+    if ( !tud_hid_ready() ) return;
+
+    // 1. Read the Clickers
+    uint8_t current_buttons = 0;
+    if ( !gpio_get(BTN_LEFT) )  current_buttons |= MOUSE_BUTTON_LEFT;
+    if ( !gpio_get(BTN_RIGHT) ) current_buttons |= MOUSE_BUTTON_RIGHT;
+
+    // 2. Read the Motion
+    int16_t dx = 0;
+    int16_t dy = 0;
+
+    // Only read the sensor if the MT (Motion) pin says there is new data
+    if ( !gpio_get(PIN_MT) ) {
+        pmw_read_motion(&dx, &dy); // This correctly populates dx and dy!
+    }
+
+    // 3. Prepare the USB Report (Clamp values to -127 / +127)
+    int8_t report_x = dx > 127 ? 127 : (dx < -127 ? -127 : (int8_t)dx);
+    int8_t report_y = dy > 127 ? 127 : (dy < -127 ? -127 : (int8_t)dy);
+
+    // 4. Send the USB update if something actually changed
+    if ( dx != 0 || dy != 0 || current_buttons != previous_buttons ) {
+        
+        // Notice we send -report_y because optical sensors usually have inverted Y axes
+        tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, report_x, -report_y, 0, 0);
+        
+        // Flash the Pico W LED when we send data so you can see it working!
+        cyw43_arch_gpio_put(PIN_LED, 1); 
+    } else {
+        cyw43_arch_gpio_put(PIN_LED, 0);
+    }
+
+    previous_buttons = current_buttons;
+} */
+// --- HID Task ---
+void hid_task(void) {
+    const uint32_t interval_ms = 2;
+    static uint32_t start_ms = 0;
+    static uint8_t previous_buttons = 0;
+
+    if ( board_millis() - start_ms < interval_ms) return; 
+    start_ms += interval_ms;
+
+    if ( !tud_hid_ready() ) return;
+
+    // 1. Read the Clickers
+    uint8_t current_buttons = 0;
+    if ( !gpio_get(BTN_LEFT) )  current_buttons |= MOUSE_BUTTON_LEFT;
+    if ( !gpio_get(BTN_RIGHT) ) current_buttons |= MOUSE_BUTTON_RIGHT;
+
+    // 2. Read the Motion
+    int16_t dx = 0;
+    int16_t dy = 0;
+
+    // BYPASS THE MT PIN! Just ask the sensor directly.
+    // Our helper function already checks the internal motion register anyway!
+    pmw_read_motion(&dx, &dy); 
+
+    // 3. Prepare the USB Report (Clamp values)
+    int8_t report_x = dx > 127 ? 127 : (dx < -127 ? -127 : (int8_t)dx);
+    int8_t report_y = dy > 127 ? 127 : (dy < -127 ? -127 : (int8_t)dy);
+
+    // 4. Send the USB update
+    if ( dx != 0 || dy != 0 || current_buttons != previous_buttons ) {
+        tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, report_x, -report_y, 0, 0);
+        cyw43_arch_gpio_put(PIN_LED, 1); // Flash LED on movement
+    } else {
+        cyw43_arch_gpio_put(PIN_LED, 0);
+    }
+
+    previous_buttons = current_buttons;
+}
 // --- TinyUSB Required Callbacks ---
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
     (void) instance; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
