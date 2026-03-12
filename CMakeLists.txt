@@ -56,10 +56,10 @@ target_link_libraries(dev_hid_composite PUBLIC
         hardware_spi
 )
 
-# CRITICAL: Disable USB standard I/O so printf doesn't crash our Mouse HID
+# CRITICAL: Enable USB output, disable UART output
 pico_enable_stdio_usb(dev_hid_composite 1)
 
-# Enable UART standard I/O (You can view your printf debug messages via UART TX/RX pins)
+# Disable UART standard I/O 
 pico_enable_stdio_uart(dev_hid_composite 0)
 
 # Uncomment this line to enable fix for Errata RP2040-E5 (the fix requires use of GPIO 15)
