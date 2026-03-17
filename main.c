@@ -31,7 +31,7 @@
 #define REG_Delta_Y_H 0x06
 
 // --- SPI Helper Functions ---
-/*uint8_t pmw_read_reg(uint8_t reg) {
+uint8_t pmw_read_reg(uint8_t reg) {
     uint8_t tx = reg & 0x7F; // MSB must be 0 for Read
     uint8_t rx = 0;
     
@@ -46,28 +46,43 @@
     sleep_us(200); 
     return rx;
 }
-*/
-    uint8_t pmw_read_reg(uint8_t reg) {
-    gpio_put(PIN_CS, 0); // Select the sensor
+
+   
+
+
+/*void pmw_read_motion(int16_t *dx, int16_t *dy) {
+    uint8_t burst_data[12];
     
-    // 1. Send the register address with the top bit set to 0 (which means "READ")
-    uint8_t addr = reg & 0x7F; 
+    gpio_put(PIN_CS, 0); // Lock the sensor in for a massive data transfer
+    
+    // 1. Send the Burst Motion command (0x50)
+    uint8_t addr = 0x50; 
     spi_write_blocking(SPI_PORT, &addr, 1);
     
-    // 2. CRITICAL PIXART DELAY: Give the sensor 2 microseconds to fetch the data!
-    sleep_us(2); 
+    // 2. Wait for the sensor to prepare the data payload
+    sleep_us(150); 
     
-    // 3. Read the actual data (we send a dummy 0x00 byte to keep the clock ticking)
-    uint8_t data = 0;
-    spi_read_blocking(SPI_PORT, 0x00, &data, 1); 
+    // 3. Clock out ALL 12 bytes at once while keeping CS LOW!
+    spi_read_blocking(SPI_PORT, 0x00, burst_data, 12); 
     
-    gpio_put(PIN_CS, 1); // Deselect the sensor
+    gpio_put(PIN_CS, 1); // Deselect the sensor now that we have everything
+    sleep_us(200); // Breathing room
     
-    // 4. ANOTHER CRITICAL DELAY: The sensor needs 20 microseconds to breathe before the next command
-    sleep_us(20); 
-    
-    return data;
+    // 4. Extract the data!
+    // burst_data[0] is the Motion register. We check the 7th bit just like before.
+    if (burst_data[0] & 0x80) {
+        cyw43_arch_gpio_put(PIN_LED, 1); // Flash the LED!
+        
+        // burst_data[2] and [3] are the X axis. [4] and [5] are the Y axis.
+        *dx = (int16_t)((burst_data[3] << 8) | burst_data[2]);
+        *dy = (int16_t)((burst_data[5] << 8) | burst_data[4]);
+    } else {
+        cyw43_arch_gpio_put(PIN_LED, 0);
+        *dx = 0;
+        *dy = 0;
+    }
 }
+*/    
 void pmw_write_reg(uint8_t reg, uint8_t data) {
     uint8_t tx[2] = { reg | 0x80, data }; // MSB must be 1 for Write
     
@@ -92,7 +107,7 @@ void pmw_upload_srom() {
     sleep_us(15); // The sensor needs exactly 15 microseconds to prepare
     
     // Fire the firmware over the wire, one byte at a time
-    for (int i = 0; i < 4096; i++) { 
+    for (int i = 0; i < 4094; i++) { 
         spi_write_blocking(SPI_PORT, &srom_data[i], 1);
         sleep_us(15); // Critical delay
     }
@@ -125,10 +140,10 @@ void pmw_upload_srom() {
     void pmw_read_motion(int16_t *dx, int16_t *dy) {
     // 1. Read the Motion register (0x02) to lock the movement data in place
     uint8_t motion = pmw_read_reg(0x02);
+    int current_buttons = 0;
     
     // Check if the 7th bit is a 1 (which means "Motion Occurred")
     if (motion & 0x80) {
-
         cyw43_arch_gpio_put(PIN_LED,1);
         // 2. You MUST read all 4 of these registers in this exact order
         uint8_t xl = pmw_read_reg(0x03); // Delta_X_L
@@ -146,6 +161,8 @@ void pmw_upload_srom() {
         *dy = 0;
     }
 } 
+   
+    
     
 /*void pmw_init() {
     // Hardware reset pulse
@@ -210,10 +227,12 @@ void pmw_init() {
         pmw_read_reg(0x06);
 
         // --- UPLOAD THE SROM BRAIN ---
-        pmw_upload_srom(); // <-- We inject our new function right here!
+        pmw_upload_srom(); // <-- We inject our new function right here!    
+        
+        pmw_write_reg(0x10, 0x00); // Disable rest mode
+        sleep_ms(10);
 
         // --- ENABLE THE SENSOR ---
-        pmw_write_reg(0x20, 0x00); // Turn off power-saving rest mode
         sleep_ms(10);
 
         // Turn off, then flash 5 times for overall success!
@@ -264,6 +283,7 @@ int main(void) {
     // Initialize the Optical Sensor
    
     pmw_init(); // Initialize the PMW3389 sensor (moved outside the loop for testing purposes)
+    stdio_init_all();
     while (1) {
         tud_task(); // TinyUSB device task
         hid_task(); // Our mouse logic
@@ -373,7 +393,7 @@ int main(void) {
 } */
 // --- HID Task ---
 void hid_task(void) {
-    const uint32_t interval_ms = 2;
+    const uint32_t interval_ms = 1;
     static uint32_t start_ms = 0;
     static uint8_t previous_buttons = 0;
 
@@ -390,22 +410,19 @@ void hid_task(void) {
     // 2. Read the Motion
     int16_t dx = 0;
     int16_t dy = 0;
-
-    // BYPASS THE MT PIN! Just ask the sensor directly.
-    // Our helper function already checks the internal motion register anyway!
     pmw_read_motion(&dx, &dy); 
-
+    uint8_t xl = pmw_read_reg(0x03);
     // 3. Prepare the USB Report (Clamp values)
     int8_t report_x = dx > 127 ? 127 : (dx < -127 ? -127 : (int8_t)dx);
     int8_t report_y = dy > 127 ? 127 : (dy < -127 ? -127 : (int8_t)dy);
 
     // 4. Send the USB update
-    if ( dx != 0 || dy != 0 || current_buttons != previous_buttons ) {
-        tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, report_x, -report_y, 0, 0);
-        cyw43_arch_gpio_put(PIN_LED, 1); // Flash LED on movement
-    } else {
-        cyw43_arch_gpio_put(PIN_LED, 0);
-    }
+    //if ( dx != 0 || dy != 0 || current_buttons != previous_buttons ) {
+        tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, (int8_t)xl, 0, 0, 0);
+        // cyw43_arch_gpio_put(PIN_LED, 1); // Flash LED on movement
+    //} //else {
+        //cyw43_arch_gpio_put(PIN_LED, 0);
+    
 
     previous_buttons = current_buttons;
 }
