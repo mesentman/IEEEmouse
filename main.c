@@ -23,80 +23,92 @@
 
 #define REPORT_ID_MOUSE 0
 
-// ---------------------------------------------------------------------------
-// SPI Helpers (Patched with QMK Strict Timings)
-// ---------------------------------------------------------------------------
 
 uint8_t pmw_read_reg(uint8_t reg) {
-    uint8_t tx = reg & 0x7F;
-    uint8_t rx = 0;
+    uint8_t tx_addr = reg & 0x7F;
+    uint8_t rx_garbage;
+    uint8_t rx_data;
+    uint8_t tx_dummy = 0x00;
+
     gpio_put(PIN_CS, 0);
-    sleep_us(1); // FIX: tNCS-SCLK delay to let sensor wake up to CS drop
+    sleep_us(5); // tNCS-SCLK delay to let sensor wake up to CS drop
     
-    spi_write_blocking(SPI_PORT, &tx, 1);
-    sleep_us(160);  // FIX: tSRAD minimum wait before reading
-    spi_read_blocking(SPI_PORT, 0x00, &rx, 1);
+    // 1. Send address and actively catch the RX garbage byte
+    spi_write_read_blocking(SPI_PORT, &tx_addr, &rx_garbage, 1);
     
+    // 2. Wait the required tSRAD
+    sleep_us(160);  
+
+    // 3. Send dummy byte to clock in the actual register data
+    spi_write_read_blocking(SPI_PORT, &tx_dummy, &rx_data, 1);
+
     gpio_put(PIN_CS, 1);
-    sleep_us(20);   // FIX: tSRW/tSRR delay between commands
-    return rx;
+    sleep_us(20);   // tSRW/tSRR delay between commands
+    
+    return rx_data;
 }
 
 void pmw_write_reg(uint8_t reg, uint8_t data) {
     uint8_t tx[2] = { reg | 0x80, data };
     gpio_put(PIN_CS, 0);
-    sleep_us(1); // FIX: tNCS-SCLK delay
+    sleep_us(1); // tNCS-SCLK delay
     
     spi_write_blocking(SPI_PORT, tx, 2);
-    sleep_us(35);   // FIX: tSCLK-NCS delay 
+    sleep_us(35);   // tSCLK-NCS delay 
     
     gpio_put(PIN_CS, 1);
-    sleep_us(145);  // FIX: tSWW/tSWR delay between commands
+    sleep_us(145);  // tSWW/tSWR delay between commands
 }
 
-// ---------------------------------------------------------------------------
-// SROM Upload (Patched Upload Sequence)
-// ---------------------------------------------------------------------------
+
+// SROM Upload
 
 void pmw_upload_srom() {
-    pmw_write_reg(0x10, 0x00); // Disable rest mode
-    pmw_write_reg(0x13, 0x1d); // SROM_Enable: set download-enable bit
+    spi_set_baudrate(SPI_PORT, 1000 * 1000);
+
+    // Disable REST mode before uploading to prevent sleep interruptions
+    pmw_write_reg(0x10, 0x20); 
     sleep_ms(10);
 
-    pmw_write_reg(0x13, 0x18); // SROM_Enable: latch start-download bit
+    pmw_write_reg(0x13, 0x1d);
+    sleep_ms(10);
+
+    pmw_write_reg(0x13, 0x18);
     sleep_ms(10);
 
     gpio_put(PIN_CS, 0);
-    sleep_us(1); // tNCS-SCLK
+    sleep_us(1);
 
-    uint8_t burst_cmd = 0x62 | 0x80; // Write to SROM_Load_Burst (0x62)
+    uint8_t burst_cmd = 0x62 | 0x80;
     spi_write_blocking(SPI_PORT, &burst_cmd, 1);
     sleep_us(15);
 
-    // Blast the firmware array
     for (int i = 0; i < firmware_length; i++) {
         spi_write_blocking(SPI_PORT, &srom_data[i], 1);
         sleep_us(15);
     }
-    sleep_us(35);
+
+    // Pull CS HIGH first to trigger the CRC calculation
     gpio_put(PIN_CS, 1); 
+    sleep_us(200);      // CRC check window
+    
+    spi_set_baudrate(SPI_PORT, 2000 * 1000);
+
+    // Arm the motion DSP immediately after upload, before anything else
+    pmw_write_reg(0x10, 0x00); // Config2: Normal tracking
     sleep_ms(10);
 
-    // Verify upload succeeded by reading back SROM_ID
     uint8_t srom_id = pmw_read_reg(0x2A);
     printf("\n>>> SROM ID READ: %02X <<<\n", srom_id);
 
-    cyw43_arch_gpio_put(PIN_LED, 0);
-    sleep_ms(500);
-
     if (srom_id == 0x00) {
-        // FAIL: Upload failed. 1 long 3-second flash
+        // Only 0x00 is a true failure
         printf("SROM UPLOAD FAILED!\n");
         cyw43_arch_gpio_put(PIN_LED, 1);
         sleep_ms(3000);
         cyw43_arch_gpio_put(PIN_LED, 0);
     } else {
-        // SUCCESS: 3 slow flashes
+        // Any non-zero ID (including 0xE8) is success
         printf("SROM UPLOAD SUCCESS (ID: %02X)!\n", srom_id);
         for (int i = 0; i < 3; i++) {
             cyw43_arch_gpio_put(PIN_LED, 1); sleep_ms(500);
@@ -105,9 +117,8 @@ void pmw_upload_srom() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sensor Init (Patched Shutdown/Wakeup Dance)
-// ---------------------------------------------------------------------------
+
+// Sensor Init
 
 void pmw_init() {
     cyw43_arch_gpio_put(PIN_LED, 1);
@@ -132,26 +143,21 @@ void pmw_init() {
     pmw_write_reg(0x3A, 0x5A); 
     sleep_ms(50);              // Wait for boot (tRESET)
 
-    // 4. CRITICAL: Read 0x02 to check the "Observation" bits
-    // This clears the power-up fault and prepares the SROM engine.
-    uint8_t obs = pmw_read_reg(0x02);
-    
-    // Clear the rest of the status registers
+    // 4. Clear power-up fault and prepare the SROM engine
+    pmw_read_reg(0x02);
     pmw_read_reg(0x03);
     pmw_read_reg(0x04);
     pmw_read_reg(0x05);
     pmw_read_reg(0x06);
 
     // 5. Upload firmware
-    // Note: Make sure you added the 35us delay at the end of the 
-    // for loop in your pmw_upload_srom() as we discussed!
     pmw_upload_srom();
     sleep_ms(10); 
 
     // 6. Final Configuration
-    pmw_write_reg(0x10, 0x00); // Disable rest mode
     sleep_ms(1);
     pmw_write_reg(0x0F, 0x10); // 800 DPI
+    pmw_write_reg(0x63, 0x00); 
 
     // 7. Clear motion registers one last time to start fresh
     pmw_read_reg(0x02);
@@ -168,53 +174,83 @@ void pmw_init() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Standard HID Task
-// ---------------------------------------------------------------------------
 
 void hid_task(void) {
-    const uint32_t interval_ms = 2;
+    const uint32_t interval_ms = 2; // 500Hz polling
     static uint32_t start_ms = 0;
+    static uint32_t last_debug_ms = 0;
     static uint8_t previous_buttons = 0;
 
     if (board_millis() - start_ms < interval_ms) return;
     start_ms += interval_ms;
-    if (!tud_hid_ready()) return;
 
+    // 1. Read Buttons
     uint8_t current_buttons = 0;
-    if (!gpio_get(BTN_LEFT))  current_buttons |= MOUSE_BUTTON_LEFT;
-    if (!gpio_get(BTN_RIGHT)) current_buttons |= MOUSE_BUTTON_RIGHT;
+    bool is_right_clicked = !gpio_get(BTN_RIGHT); 
 
+    if (!gpio_get(BTN_LEFT))  current_buttons |= MOUSE_BUTTON_LEFT;
+    if (is_right_clicked)     current_buttons |= MOUSE_BUTTON_RIGHT;
+
+    // 2. Read Motion Burst (Only do this ONCE per cycle!)
     uint8_t buf[12] = {0};
-    uint8_t cmd = 0x50;
+    uint8_t cmd = 0x50; // Burst read command
+    uint8_t garbage_rx;
+    
     gpio_put(PIN_CS, 0);
     sleep_us(1); // tNCS-SCLK delay
-    spi_write_blocking(SPI_PORT, &cmd, 1);
-    sleep_us(35);  // tSRAD_MOTBR wait
+    
+    // Send burst command, actively catching and discarding the garbage byte
+    spi_write_read_blocking(SPI_PORT, &cmd, &garbage_rx, 1);
+    
+    sleep_us(50);  // tSRAD_MOTBR wait
+    
+    // Read the actual 12 payload bytes
     spi_read_blocking(SPI_PORT, 0x00, buf, 12);
+    
     gpio_put(PIN_CS, 1);
-    sleep_us(1);  // tBEXIT conservative wait
+    sleep_us(2);  // tBEXIT conservative wait
 
+    // 3. Parse Motion
     int8_t report_x = 0;
     int8_t report_y = 0;
 
-    if (buf[0] & 0x80) {
+    if (buf[0] & 0x80) { // Check the valid motion bit
         int16_t dx = (int16_t)((buf[3] << 8) | buf[2]);
         int16_t dy = (int16_t)((buf[5] << 8) | buf[4]);
+        // Clamp values to int8_t limits
         report_x = (int8_t)(dx > 127 ? 127 : dx < -127 ? -127 : dx);
         report_y = (int8_t)(dy > 127 ? 127 : dy < -127 ? -127 : dy);
     }
 
-    if (current_buttons || report_x || report_y || current_buttons != previous_buttons) {
-        tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, report_x, -report_y, 0, 0);
+    // 4. Send USB HID Report
+    if (tud_hid_ready()) {
+        if (current_buttons || report_x || report_y || current_buttons != previous_buttons) {
+            tud_hid_mouse_report(REPORT_ID_MOUSE, current_buttons, report_x, -report_y, 0, 0);
+        }
     }
-
     previous_buttons = current_buttons;
+
+    // 5. Serial Debugging (Triggered by holding Right Click)
+    if (is_right_clicked && (board_millis() - last_debug_ms > 100)) {
+        uint8_t motion = pmw_read_reg(0x02);
+        uint8_t xl = pmw_read_reg(0x03);
+        uint8_t xh = pmw_read_reg(0x04);
+        uint8_t yl = pmw_read_reg(0x05);
+        uint8_t yh = pmw_read_reg(0x06);
+        uint8_t SQUAL = pmw_read_reg(0x07);
+
+        printf("DIRECT | MOT:%02X dX:%d dY:%d SQUAL:%02X\n",
+        motion,
+        (int16_t)((xh << 8) | xl),
+        (int16_t)((yh << 8) | yl),
+        SQUAL);
+        
+    last_debug_ms = board_millis();
+    }
 }
 
-// ---------------------------------------------------------------------------
 // Entry Point
-// ---------------------------------------------------------------------------
 
 int main(void) {
     board_init();
@@ -231,7 +267,7 @@ int main(void) {
     gpio_init(PIN_RST); gpio_set_dir(PIN_RST, GPIO_OUT); gpio_put(PIN_RST, 1);
     gpio_init(PIN_MT);  gpio_set_dir(PIN_MT, GPIO_IN);  gpio_pull_up(PIN_MT);
 
-    // SPI: Mode 3 (CPOL=1, CPHA=1) at 2MHz
+    // SPI: Mode 3 (CPOL=1, CPHA=1) at 2MHz initially
     spi_init(SPI_PORT, 2000 * 1000);
     spi_set_format(SPI_PORT, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
     gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
@@ -242,36 +278,11 @@ int main(void) {
 
     while (1) {
         tud_task();
-        
-        bool is_right_clicked = !gpio_get(BTN_RIGHT); 
-
-        if (is_right_clicked) {
-            // RIGHT CLICK DEBUG TESTER
-            uint8_t buf[12] = {0};
-            uint8_t cmd = 0x50; // Burst read command
-            
-            gpio_put(PIN_CS, 0);
-            sleep_us(1); // tNCS-SCLK delay
-            spi_write_blocking(SPI_PORT, &cmd, 1);
-            sleep_us(35); // tSRAD_MOTBR wait
-            spi_read_blocking(SPI_PORT, 0x00, buf, 12); 
-            gpio_put(PIN_CS, 1);
-            sleep_us(1); // tBEXIT wait
-            
-            printf("RAW BURST | 0:%02X  1:%02X  2:%02X  3:%02X  4:%02X  5:%02X  SQ:%d\n", 
-                   buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
-            
-            sleep_ms(100); // Throttle debug output
-        } else {
-            // Only run normal HID tasks if we aren't holding right click to debug
-            hid_task();
-        }
+        hid_task();
     }
 }
 
-// ---------------------------------------------------------------------------
 // TinyUSB Callbacks
-// ---------------------------------------------------------------------------
 
 void tud_hid_set_report_cb(
     uint8_t instance, uint8_t report_id,
